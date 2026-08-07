@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+import os
+import select
+import struct
+import subprocess
+import time
+
+GAMEPAD = "/dev/input/by-id/usb-Zikway_HID_gamepad-joystick"
+FALLBACK = "/dev/input/js0"
+MENU = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game-menu")
+LOG = "/tmp/gamepad-menu-listener.log"
+HOME_BUTTON = 12
+DEBOUNCE_SECONDS = 0.7
+
+
+def log(message):
+    with open(LOG, "a", encoding="utf-8") as log_file:
+        print(f"{time.strftime('%F %T')} {message}", file=log_file, flush=True)
+
+
+def open_gamepad():
+    path = GAMEPAD if os.path.exists(GAMEPAD) else FALLBACK
+    log(f"opening {path}")
+    return open(path, "rb", buffering=0)
+
+
+last_press = 0.0
+
+while True:
+    try:
+        with open_gamepad() as gamepad:
+            while True:
+                ready, _, _ = select.select([gamepad], [], [], 1)
+                if not ready:
+                    continue
+
+                data = gamepad.read(8)
+                if len(data) != 8:
+                    break
+
+                _, value, event_type, number = struct.unpack("IhBB", data)
+                if event_type & 0x80:
+                    continue
+
+                is_button = event_type & 0x01
+                if is_button and number == HOME_BUTTON and value == 1:
+                    now = time.monotonic()
+                    if now - last_press >= DEBOUNCE_SECONDS:
+                        last_press = now
+                        log(f"home button pressed: type={event_type} number={number} value={value}")
+                        subprocess.Popen([MENU])
+    except FileNotFoundError:
+        log("gamepad not found")
+        time.sleep(2)
+    except PermissionError:
+        log("permission denied")
+        time.sleep(2)
+    except Exception as exc:
+        log(f"error: {exc}")
+        time.sleep(2)

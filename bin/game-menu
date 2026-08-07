@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+import fcntl
+import hashlib
+import os
+import select
+import struct
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango
+
+GAMEPAD = "/dev/input/by-id/usb-Zikway_HID_gamepad-joystick"
+FALLBACK = "/dev/input/js0"
+LOCK_PATH = "/tmp/game-menu.lock"
+ART_CACHE_DIR = "/tmp/game-menu-art"
+ART_SIZE = 112
+
+A_BUTTON = 0
+B_BUTTON = 1
+HOME_BUTTON = 12
+DPAD_X = 6
+DPAD_Y = 7
+LEFT_STICK_Y = 1
+MOVE_DEBOUNCE = 0.18
+
+
+ITEMS = [
+    ("Play / pause", ["playerctl", "play-pause"], False),
+    ("Next track", ["playerctl", "next"], False),
+    ("Previous track", ["playerctl", "previous"], False),
+    ("Volume up", ["wpctl", "set-volume", "-l", "1", "@DEFAULT_AUDIO_SINK@", "5%+"], False),
+    ("Volume down", ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"], False),
+    ("Mute volume", ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"], False),
+    ("Open Steam Big Picture", ["steam", "-gamepadui"], True),
+    ("Screenshot area", 'grim -g "$(slurp)" - | wl-copy', True),
+    ("System monitor", ["plasma-systemmonitor"], True),
+    ("Exit Hyprland", ["hyprctl", "dispatch", "exit"], True),
+]
+
+
+CSS = """
+window {
+    background: rgba(20, 22, 26, 0.94);
+    color: #f6f7f9;
+    border-radius: 10px;
+}
+
+#title {
+    font-size: 20px;
+    font-weight: 700;
+}
+
+#hint {
+    color: #aeb6c2;
+    font-size: 12px;
+}
+
+#now-playing {
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 8px;
+    padding: 10px;
+}
+
+#track-title {
+    font-size: 16px;
+    font-weight: 700;
+}
+
+#track-artist {
+    color: #aeb6c2;
+    font-size: 13px;
+}
+
+#track-time {
+    color: #aeb6c2;
+    font-size: 12px;
+}
+
+progressbar trough {
+    min-height: 6px;
+    border-radius: 999px;
+    background: #30343b;
+}
+
+progressbar progress {
+    min-height: 6px;
+    border-radius: 999px;
+    background: #2f7dd3;
+}
+
+#album-placeholder {
+    background: #30343b;
+    border-radius: 6px;
+}
+
+.menu-row {
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 16px;
+}
+
+.selected {
+    background: #2f7dd3;
+    color: white;
+}
+"""
+
+
+def notify(message):
+    if shutil_which("notify-send"):
+        subprocess.Popen(["notify-send", "Game menu", message])
+
+
+def shutil_which(name):
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        path = os.path.join(directory, name)
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def open_gamepad():
+    path = GAMEPAD if os.path.exists(GAMEPAD) else FALLBACK
+    return open(path, "rb", buffering=0)
+
+
+def current_track():
+    try:
+        output = subprocess.check_output(
+            [
+                "playerctl",
+                "-p",
+                "spotify",
+                "metadata",
+                "--format",
+                "{{artist}}\n{{title}}\n{{mpris:artUrl}}\n{{mpris:length}}",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+        )
+    except Exception:
+        return None
+
+    lines = output.rstrip("\n").split("\n")
+    while len(lines) < 4:
+        lines.append("")
+
+    artist, title, art_url, length = lines[:4]
+    try:
+        length_seconds = max(0.0, int(length) / 1_000_000)
+    except ValueError:
+        length_seconds = 0.0
+    try:
+        position = max(
+            0.0,
+            float(
+                subprocess.check_output(
+                    ["playerctl", "-p", "spotify", "position"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                    timeout=1,
+                ).strip()
+            ),
+        )
+    except Exception:
+        position = 0.0
+
+    if not artist and not title and not art_url:
+        return None
+    return {
+        "artist": artist,
+        "title": title,
+        "art_url": art_url,
+        "length": length_seconds,
+        "position": position,
+    }
+
+
+def cached_art_path(art_url):
+    if not art_url:
+        return None
+
+    parsed = urllib.parse.urlparse(art_url)
+    if parsed.scheme == "file":
+        return urllib.request.url2pathname(parsed.path)
+
+    if parsed.scheme not in ("http", "https"):
+        return None
+
+    os.makedirs(ART_CACHE_DIR, exist_ok=True)
+    digest = hashlib.sha256(art_url.encode("utf-8")).hexdigest()
+    path = os.path.join(ART_CACHE_DIR, f"{digest}.jpg")
+    if os.path.exists(path):
+        return path
+
+    try:
+        with urllib.request.urlopen(art_url, timeout=2) as response:
+            image = response.read(2_000_000)
+        with open(path, "wb") as image_file:
+            image_file.write(image)
+        return path
+    except Exception:
+        return None
+
+
+def format_time(seconds):
+    seconds = max(0, int(seconds))
+    minutes, seconds = divmod(seconds, 60)
+    return f"{minutes}:{seconds:02d}"
+
+
+class GameMenu(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Game Menu")
+        self.set_default_size(420, 520)
+        self.set_resizable(False)
+        self.set_decorated(False)
+        self.set_keep_above(True)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        try:
+            self.set_wmclass("game-menu", "game-menu")
+        except Exception:
+            pass
+
+        self.selected = 0
+        self.last_move = 0.0
+        self.gamepad = None
+        self.rows = []
+        self.art = Gtk.Image()
+        self.track_title = Gtk.Label(xalign=0)
+        self.track_artist = Gtk.Label(xalign=0)
+        self.elapsed_label = Gtk.Label(xalign=0)
+        self.remaining_label = Gtk.Label(xalign=1)
+        self.progress = Gtk.ProgressBar()
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS.encode())
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(18)
+        box.set_margin_bottom(18)
+        box.set_margin_start(18)
+        box.set_margin_end(18)
+        self.add(box)
+
+        title = Gtk.Label(label="Game Menu", xalign=0)
+        title.set_name("title")
+        box.pack_start(title, False, False, 0)
+
+        now_playing = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        now_playing.set_name("now-playing")
+        box.pack_start(now_playing, False, False, 0)
+
+        self.art.set_size_request(ART_SIZE, ART_SIZE)
+        self.art.set_name("album-placeholder")
+        now_playing.pack_start(self.art, False, False, 0)
+
+        track_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        track_box.set_valign(Gtk.Align.CENTER)
+        now_playing.pack_start(track_box, True, True, 0)
+
+        self.track_title.set_name("track-title")
+        self.track_title.set_ellipsize(Pango.EllipsizeMode.END)
+        self.track_artist.set_name("track-artist")
+        self.track_artist.set_ellipsize(Pango.EllipsizeMode.END)
+        track_box.pack_start(self.track_title, False, False, 0)
+        track_box.pack_start(self.track_artist, False, False, 0)
+
+        progress_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        progress_box.set_margin_top(8)
+        track_box.pack_start(progress_box, False, False, 0)
+        progress_box.pack_start(self.progress, False, False, 0)
+
+        time_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        progress_box.pack_start(time_box, False, False, 0)
+        self.elapsed_label.set_name("track-time")
+        self.remaining_label.set_name("track-time")
+        time_box.pack_start(self.elapsed_label, False, False, 0)
+        time_box.pack_end(self.remaining_label, False, False, 0)
+
+        hint = Gtk.Label(label="D-pad/left stick: move    A: select    B/Home: close", xalign=0)
+        hint.set_name("hint")
+        box.pack_start(hint, False, False, 0)
+
+        for label, _, _ in ITEMS:
+            row = Gtk.Label(label=label, xalign=0)
+            row.get_style_context().add_class("menu-row")
+            box.pack_start(row, False, False, 0)
+            self.rows.append(row)
+
+        self.connect("destroy", Gtk.main_quit)
+        self.connect("key-press-event", self.on_key_press)
+        self.update_now_playing()
+        self.refresh()
+        self.show_all()
+
+        self.try_open_gamepad()
+        GLib.timeout_add(25, self.poll_gamepad)
+        GLib.timeout_add(1000, self.update_now_playing_timer)
+
+    def try_open_gamepad(self):
+        if self.gamepad is not None:
+            return
+        try:
+            self.gamepad = open_gamepad()
+        except (FileNotFoundError, PermissionError):
+            self.gamepad = None
+
+    def refresh(self):
+        for index, row in enumerate(self.rows):
+            context = row.get_style_context()
+            if index == self.selected:
+                context.add_class("selected")
+            else:
+                context.remove_class("selected")
+
+    def move(self, delta):
+        now = time.monotonic()
+        if now - self.last_move < MOVE_DEBOUNCE:
+            return
+        self.last_move = now
+        self.selected = (self.selected + delta) % len(ITEMS)
+        self.refresh()
+
+    def activate(self):
+        _, command, close_after = ITEMS[self.selected]
+        try:
+            if isinstance(command, str):
+                subprocess.Popen(command, shell=True)
+            else:
+                subprocess.Popen(command)
+        except Exception as exc:
+            notify(str(exc))
+        if close_after:
+            Gtk.main_quit()
+        else:
+            GLib.timeout_add(400, self.update_now_playing_once)
+
+    def update_now_playing_once(self):
+        self.update_now_playing()
+        return False
+
+    def update_now_playing_timer(self):
+        self.update_now_playing()
+        return True
+
+    def update_now_playing(self):
+        track = current_track()
+        if not track:
+            self.track_title.set_text("Nothing playing")
+            self.track_artist.set_text("Spotify")
+            self.elapsed_label.set_text("0:00")
+            self.remaining_label.set_text("-0:00")
+            self.progress.set_fraction(0)
+            self.art.clear()
+            return
+
+        self.track_title.set_text(track["title"] or "Unknown track")
+        self.track_artist.set_text(track["artist"] or "Unknown artist")
+        if track["length"] > 0:
+            fraction = min(1.0, track["position"] / track["length"])
+            remaining = max(0.0, track["length"] - track["position"])
+            self.progress.set_fraction(fraction)
+            self.elapsed_label.set_text(format_time(track["position"]))
+            self.remaining_label.set_text(f"-{format_time(remaining)}")
+        else:
+            self.progress.set_fraction(0)
+            self.elapsed_label.set_text("0:00")
+            self.remaining_label.set_text("-0:00")
+
+        art_path = cached_art_path(track["art_url"])
+        if not art_path:
+            self.art.clear()
+            return
+
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                art_path, ART_SIZE, ART_SIZE, True
+            )
+            self.art.set_from_pixbuf(pixbuf)
+        except Exception:
+            self.art.clear()
+
+    def on_key_press(self, _, event):
+        key = Gdk.keyval_name(event.keyval)
+        if key in ("Up", "KP_Up"):
+            self.move(-1)
+        elif key in ("Down", "KP_Down"):
+            self.move(1)
+        elif key in ("Return", "KP_Enter", "space"):
+            self.activate()
+        elif key in ("Escape", "BackSpace"):
+            Gtk.main_quit()
+
+    def poll_gamepad(self):
+        self.try_open_gamepad()
+        if self.gamepad is None:
+            return True
+
+        try:
+            while True:
+                ready, _, _ = select.select([self.gamepad], [], [], 0)
+                if not ready:
+                    break
+
+                data = self.gamepad.read(8)
+                if len(data) != 8:
+                    self.gamepad.close()
+                    self.gamepad = None
+                    break
+
+                _, value, event_type, number = struct.unpack("IhBB", data)
+                if event_type & 0x80:
+                    continue
+                if event_type & 0x02:
+                    if number in (DPAD_Y, LEFT_STICK_Y):
+                        if value < -18000:
+                            self.move(-1)
+                        elif value > 18000:
+                            self.move(1)
+                    elif number == DPAD_X:
+                        if value < -18000:
+                            self.move(-1)
+                        elif value > 18000:
+                            self.move(1)
+                elif event_type & 0x01 and value == 1:
+                    if number == A_BUTTON:
+                        self.activate()
+                    elif number in (B_BUTTON, HOME_BUTTON):
+                        Gtk.main_quit()
+        except OSError:
+            self.gamepad = None
+
+        return True
+
+
+def main():
+    lock_file = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return 0
+
+    window = GameMenu()
+    Gtk.main()
+    window.destroy()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
