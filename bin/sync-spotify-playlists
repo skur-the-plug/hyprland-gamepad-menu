@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+import argparse
+import base64
+import hashlib
+import http.server
+import json
+import os
+import secrets
+import subprocess
+import sys
+import threading
+import urllib.parse
+import urllib.request
+
+CONFIG_DIR = os.path.expanduser("~/.config/gamepad-menu")
+CLIENT_PATH = os.path.join(CONFIG_DIR, "spotify-client.json")
+TOKEN_PATH = os.path.join(CONFIG_DIR, "spotify-token.json")
+PLAYLISTS_PATH = os.path.join(CONFIG_DIR, "playlists.json")
+REDIRECT_URI = "http://127.0.0.1:8888/callback"
+SCOPES = "playlist-read-private playlist-read-collaborative"
+
+
+class CallbackHandler(http.server.BaseHTTPRequestHandler):
+    code = None
+    error = None
+    state = None
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        CallbackHandler.code = params.get("code", [None])[0]
+        CallbackHandler.error = params.get("error", [None])[0]
+        CallbackHandler.state = params.get("state", [None])[0]
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Spotify authorization complete. You can close this tab.\n")
+
+    def log_message(self, *_):
+        return
+
+
+def read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as json_file:
+            return json.load(json_file)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as json_file:
+        json.dump(data, json_file, indent=2, sort_keys=True)
+        json_file.write("\n")
+
+
+def load_client_id(args):
+    if args.client_id:
+        write_json(CLIENT_PATH, {"client_id": args.client_id})
+        return args.client_id
+
+    if os.environ.get("SPOTIFY_CLIENT_ID"):
+        return os.environ["SPOTIFY_CLIENT_ID"]
+
+    client = read_json(CLIENT_PATH)
+    if client.get("client_id"):
+        return client["client_id"]
+
+    print("Missing Spotify client ID.", file=sys.stderr)
+    print("Create a Spotify app, add this redirect URI, then rerun with --client-id:", file=sys.stderr)
+    print(f"  {REDIRECT_URI}", file=sys.stderr)
+    return None
+
+
+def code_challenge(verifier):
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def request_token(body):
+    data = urllib.parse.urlencode(body).encode("utf-8")
+    request = urllib.request.Request(
+        "https://accounts.spotify.com/api/token",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def authorize(client_id):
+    verifier = secrets.token_urlsafe(64)
+    state = secrets.token_urlsafe(24)
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "scope": SCOPES,
+        "redirect_uri": REDIRECT_URI,
+        "state": state,
+        "code_challenge_method": "S256",
+        "code_challenge": code_challenge(verifier),
+    }
+    auth_url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode(params)
+
+    server = http.server.HTTPServer(("127.0.0.1", 8888), CallbackHandler)
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+
+    print("Open this URL to authorize Spotify playlists:")
+    print(auth_url)
+    if not subprocess.call(["bash", "-lc", f"command -v xdg-open >/dev/null && xdg-open '{auth_url}' >/dev/null 2>&1"]):
+        pass
+
+    thread.join(timeout=180)
+    server.server_close()
+
+    if CallbackHandler.error:
+        raise RuntimeError(f"Spotify authorization failed: {CallbackHandler.error}")
+    if not CallbackHandler.code:
+        raise RuntimeError("Timed out waiting for Spotify authorization")
+    if CallbackHandler.state != state:
+        raise RuntimeError("Spotify authorization state mismatch")
+
+    token = request_token(
+        {
+            "grant_type": "authorization_code",
+            "code": CallbackHandler.code,
+            "redirect_uri": REDIRECT_URI,
+            "client_id": client_id,
+            "code_verifier": verifier,
+        }
+    )
+    write_json(TOKEN_PATH, token)
+    return token
+
+
+def refresh_token(client_id, refresh):
+    token = request_token(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": client_id,
+        }
+    )
+    if "refresh_token" not in token:
+        token["refresh_token"] = refresh
+    write_json(TOKEN_PATH, token)
+    return token
+
+
+def api_get(path_or_url, access_token):
+    url = path_or_url
+    if path_or_url.startswith("/"):
+        url = "https://api.spotify.com/v1" + path_or_url
+    request = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def playlist_cover(playlist):
+    images = playlist.get("images") or []
+    if not images:
+        return ""
+    return images[0].get("url") or ""
+
+
+def fetch_playlists(access_token):
+    playlists = []
+    next_url = "/me/playlists?limit=50"
+    while next_url:
+        page = api_get(next_url, access_token)
+        for playlist in page.get("items", []):
+            if not playlist:
+                continue
+            name = playlist.get("name") or "Untitled playlist"
+            uri = playlist.get("uri") or ""
+            if not uri:
+                continue
+            playlists.append(
+                {
+                    "name": name,
+                    "uri": uri,
+                    "cover_url": playlist_cover(playlist),
+                    "spotify_url": (playlist.get("external_urls") or {}).get("spotify", ""),
+                }
+            )
+        next_url = page.get("next")
+    return playlists
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Sync current user's Spotify playlists for gamepad-menu.")
+    parser.add_argument("--client-id", help="Spotify app client ID. Stored for future syncs.")
+    parser.add_argument("--reauth", action="store_true", help="Force browser authorization.")
+    args = parser.parse_args()
+
+    client_id = load_client_id(args)
+    if not client_id:
+        return 2
+
+    token = read_json(TOKEN_PATH)
+    if args.reauth or not token.get("access_token"):
+        token = authorize(client_id)
+    elif token.get("refresh_token"):
+        try:
+            token = refresh_token(client_id, token["refresh_token"])
+        except Exception:
+            token = authorize(client_id)
+
+    playlists = fetch_playlists(token["access_token"])
+    write_json(PLAYLISTS_PATH, playlists)
+    print(f"Wrote {len(playlists)} playlists to {PLAYLISTS_PATH}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

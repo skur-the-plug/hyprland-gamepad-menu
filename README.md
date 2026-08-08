@@ -1,18 +1,17 @@
-# Gamepad Menu for Hyprland
+# Hyprland Gamepad Menu
 
-A small controller-friendly overlay for Hyprland.
+A controller-friendly overlay menu for Hyprland. It is meant for game sessions where you want a quick controller menu for media, volume, Spotify, screenshots, Steam Big Picture, and desktop actions.
 
-It opens from a gamepad Home/Guide button and can be controlled with:
+## Features
 
-- D-pad or left stick: move selection
-- A: activate selected action
-- B or Home/Guide: close
-
-While the menu is open it tries to exclusively grab the controller event device, so background games do not also receive the menu navigation buttons.
-
-The menu includes Spotify now-playing artwork, title, artist, elapsed time, a progress bar, remaining time, media controls, volume controls, Steam Big Picture, screenshots, system monitor, and Hyprland exit.
-
-The Settings entry lets you toggle visible menu actions and enable auto pause on open. Auto pause sends `Escape` to the focused game before the overlay opens, which matches the pause/menu key for many PC games.
+- Opens from a controller Home/Guide button.
+- Controller navigation: D-pad or left stick to move, A to select, B/Home to go back or close.
+- Exclusively grabs the controller while open, so background games do not also receive menu inputs.
+- Spotify now-playing panel with cover art, title, artist, progress, elapsed time, and remaining time.
+- Spotify playlist picker with cover thumbnails, paged 8 playlists at a time.
+- Spotify play modes: shuffle and repeat off/track/playlist.
+- Settings screen for hiding menu actions and enabling auto pause on open.
+- Auto pause sends `Escape` to the focused game before opening the overlay.
 
 ## Requirements
 
@@ -20,30 +19,112 @@ The Settings entry lets you toggle visible menu actions and enable auto pause on
 - Python 3
 - GTK 3 Python bindings: `python-gobject` / `python-gi`
 - `playerctl`
-- `wireplumber` or PipeWire tools for `wpctl`
-- `steam`
-- `grim`, `slurp`, and `wl-copy` for screenshots
+- `wpctl` from WirePlumber/PipeWire
 - `wtype` for auto pause on open
-- A controller exposed as `/dev/input/js0` or `/dev/input/by-id/usb-Zikway_HID_gamepad-joystick`
-- Read access to `/dev/input/by-id/usb-Zikway_HID_gamepad-event-joystick` for exclusive input grabbing
+- `grim`, `slurp`, and `wl-copy` for screenshots
+- `steam` for the Steam Big Picture action
+- A Linux joystick device such as `/dev/input/js0`
+- Read access to the controller event device for exclusive input grabbing
+
+This project currently defaults to a Zikway-style controller path:
+
+```text
+/dev/input/by-id/usb-Zikway_HID_gamepad-joystick
+/dev/input/by-id/usb-Zikway_HID_gamepad-event-joystick
+```
+
+For another controller, edit `GAMEPAD`, `GAMEPAD_EVENT`, `HOME_BUTTON`, and button/axis constants in `bin/game-menu` and `bin/gamepad-menu-listener`.
 
 ## Install
 
 ```bash
+git clone https://github.com/skur-the-plug/hyprland-gamepad-menu.git
+cd hyprland-gamepad-menu
 ./install.sh
 ```
 
-Then add the contents of `hypr/hyprland.conf` to `~/.config/hypr/hyprland.conf` and reload Hyprland:
+The installer places:
+
+```text
+~/.local/bin/game-menu
+~/.local/bin/gamepad-menu-listener
+~/.local/bin/sync-spotify-playlists
+```
+
+Add the contents of `hypr/hyprland.conf` to `~/.config/hypr/hyprland.conf`, then reload Hyprland:
 
 ```bash
 hyprctl reload
 ```
 
-## Local Paths
+You can also test the menu from the keyboard with:
 
-The installer places:
+```text
+SUPER+G
+```
 
-- `~/.local/bin/game-menu`
-- `~/.local/bin/gamepad-menu-listener`
+## Spotify Playlists
 
-The listener watches button `12` as the Home/Guide button. If your controller uses a different button number, edit `HOME_BUTTON` in both scripts.
+Spotify Desktop/playerctl can control playback and expose current track metadata, but it does not expose your full playlist library. To show your own playlists, sync them through Spotify Web API.
+
+1. Create a Spotify app at `https://developer.spotify.com/dashboard`.
+2. Enable **Web API**.
+3. Add this redirect URI:
+
+```text
+http://127.0.0.1:8888/callback
+```
+
+4. Copy the app's Client ID and run:
+
+```bash
+sync-spotify-playlists --client-id YOUR_SPOTIFY_CLIENT_ID
+```
+
+The sync command uses Spotify Authorization Code with PKCE, asks for playlist-read scopes, and writes:
+
+```text
+~/.config/gamepad-menu/playlists.json
+```
+
+The menu reads that file and displays playlists under `Spotify playlists`.
+
+You can also maintain the file manually:
+
+```json
+[
+  {
+    "name": "My playlist",
+    "uri": "spotify:playlist:YOUR_PLAYLIST_ID",
+    "cover_url": "https://i.scdn.co/image/..."
+  }
+]
+```
+
+See `examples/playlists.json` for a starter file.
+
+## Settings
+
+The menu writes settings to:
+
+```text
+~/.config/gamepad-menu/settings.json
+```
+
+Available settings in the UI:
+
+- `Auto pause on open`: sends `Escape` to the focused game before opening the overlay.
+- `Show ...`: toggles which actions appear in the main menu.
+
+## Controls
+
+- Home/Guide: open menu from the listener; close when already inside the menu.
+- D-pad/left stick: move selection.
+- A: activate selected action.
+- B: back from submenus, close from the main menu.
+
+## Notes
+
+- Auto pause is game-dependent. Many PC games pause/open their menu on `Escape`; some do not.
+- Online games may keep running server-side even if their local pause menu opens.
+- Playlist covers are loaded only for the visible page to keep the overlay responsive with large playlist libraries.

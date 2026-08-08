@@ -25,6 +25,9 @@ LOCK_PATH = "/tmp/game-menu.lock"
 ART_CACHE_DIR = "/tmp/game-menu-art"
 ART_SIZE = 112
 CONFIG_PATH = os.path.expanduser("~/.config/gamepad-menu/settings.json")
+PLAYLISTS_PATH = os.path.expanduser("~/.config/gamepad-menu/playlists.json")
+PLAYLIST_ART_SIZE = 44
+PLAYLISTS_PER_PAGE = 8
 
 A_BUTTON = 0
 B_BUTTON = 1
@@ -122,6 +125,10 @@ progressbar progress {
     border-radius: 6px;
 }
 
+.playlist-cover {
+    border-radius: 4px;
+}
+
 .menu-row {
     padding: 10px 14px;
     border-radius: 6px;
@@ -181,6 +188,28 @@ def save_settings(settings):
     with open(CONFIG_PATH, "w", encoding="utf-8") as settings_file:
         json.dump(settings, settings_file, indent=2, sort_keys=True)
         settings_file.write("\n")
+
+
+def load_playlists():
+    try:
+        with open(PLAYLISTS_PATH, "r", encoding="utf-8") as playlists_file:
+            playlists = json.load(playlists_file)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+
+    if not isinstance(playlists, list):
+        return []
+
+    valid_playlists = []
+    for playlist in playlists:
+        if not isinstance(playlist, dict):
+            continue
+        name = str(playlist.get("name", "")).strip()
+        uri = str(playlist.get("uri", "")).strip()
+        cover_url = str(playlist.get("cover_url", "")).strip()
+        if name and uri:
+            valid_playlists.append({"name": name, "uri": uri, "cover_url": cover_url})
+    return valid_playlists
 
 
 def open_gamepad():
@@ -254,6 +283,26 @@ def volume_is_muted():
     return "[MUTED]" in output
 
 
+def playerctl_value(command, fallback):
+    try:
+        return subprocess.check_output(
+            ["playerctl", "-p", "spotify", command],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+        ).strip()
+    except Exception:
+        return fallback
+
+
+def shuffle_state():
+    return playerctl_value("shuffle", "Off")
+
+
+def loop_state():
+    return playerctl_value("loop", "None")
+
+
 def cached_art_path(art_url):
     if not art_url:
         return None
@@ -323,6 +372,8 @@ class GameMenu(Gtk.Window):
         self.view = "main"
         self.items = []
         self.settings = load_settings()
+        self.playlists = []
+        self.playlist_page = 0
         self.last_move = 0.0
         self.gamepad = None
         self.gamepad_event = grabbed_gamepad
@@ -413,11 +464,45 @@ class GameMenu(Gtk.Window):
 
     def main_items(self):
         items = []
+        items.append({"type": "playlists"})
+        items.append({"type": "play_modes"})
         for action in ACTIONS:
             if self.settings["show_actions"].get(action["key"], True):
                 items.append({"type": "action", "action": action})
         items.append({"type": "settings"})
         return items
+
+    def playlist_items(self):
+        if not self.playlists:
+            self.playlists = load_playlists()
+
+        total = len(self.playlists)
+        start = self.playlist_page * PLAYLISTS_PER_PAGE
+        if start >= total:
+            self.playlist_page = 0
+            start = 0
+        end = min(start + PLAYLISTS_PER_PAGE, total)
+
+        items = []
+        if self.playlist_page > 0:
+            items.append({"type": "playlist_prev_page"})
+        for playlist in self.playlists[start:end]:
+            items.append({"type": "playlist", "playlist": playlist})
+        if end < total:
+            items.append({"type": "playlist_next_page"})
+        if not items:
+            items.append({"type": "empty", "label": "No playlists configured"})
+        items.append({"type": "back"})
+        return items
+
+    def play_mode_items(self):
+        return [
+            {"type": "shuffle_toggle"},
+            {"type": "repeat_none"},
+            {"type": "repeat_track"},
+            {"type": "repeat_playlist"},
+            {"type": "back"},
+        ]
 
     def settings_items(self):
         items = [{"type": "toggle_auto_pause"}]
@@ -432,6 +517,31 @@ class GameMenu(Gtk.Window):
             if item["action"]["key"] == "mute_volume" and volume_is_muted():
                 return "Unmute volume"
             return item["action"]["label"]
+        if item_type == "playlists":
+            return "Spotify playlists"
+        if item_type == "play_modes":
+            return "Play modes"
+        if item_type == "playlist":
+            return item["playlist"]["name"]
+        if item_type == "playlist_next_page":
+            total_pages = max(1, (len(self.playlists) + PLAYLISTS_PER_PAGE - 1) // PLAYLISTS_PER_PAGE)
+            return f"Next page ({self.playlist_page + 2}/{total_pages})"
+        if item_type == "playlist_prev_page":
+            total_pages = max(1, (len(self.playlists) + PLAYLISTS_PER_PAGE - 1) // PLAYLISTS_PER_PAGE)
+            return f"Previous page ({self.playlist_page}/{total_pages})"
+        if item_type == "empty":
+            return item["label"]
+        if item_type == "shuffle_toggle":
+            return f"Shuffle: {shuffle_state()}"
+        if item_type == "repeat_none":
+            prefix = ">" if loop_state() == "None" else " "
+            return f"{prefix} Repeat off"
+        if item_type == "repeat_track":
+            prefix = ">" if loop_state() == "Track" else " "
+            return f"{prefix} Repeat track"
+        if item_type == "repeat_playlist":
+            prefix = ">" if loop_state() == "Playlist" else " "
+            return f"{prefix} Repeat playlist"
         if item_type == "settings":
             return "Settings"
         if item_type == "toggle_auto_pause":
@@ -449,14 +559,20 @@ class GameMenu(Gtk.Window):
         for child in self.menu_box.get_children():
             self.menu_box.remove(child)
 
-        self.items = self.settings_items() if self.view == "settings" else self.main_items()
+        if self.view == "settings":
+            self.items = self.settings_items()
+        elif self.view == "playlists":
+            self.items = self.playlist_items()
+        elif self.view == "play_modes":
+            self.items = self.play_mode_items()
+        else:
+            self.items = self.main_items()
         if self.selected >= len(self.items):
             self.selected = max(0, len(self.items) - 1)
 
         self.rows = []
         for item in self.items:
-            row = Gtk.Label(label=self.item_label(item), xalign=0)
-            row.get_style_context().add_class("menu-row")
+            row = self.build_row(item)
             self.menu_box.pack_start(row, False, False, 0)
             self.rows.append(row)
 
@@ -465,12 +581,43 @@ class GameMenu(Gtk.Window):
 
     def refresh(self):
         for index, row in enumerate(self.rows):
-            row.set_text(self.item_label(self.items[index]))
+            label = getattr(row, "menu_label", None)
+            if label is not None:
+                label.set_text(self.item_label(self.items[index]))
             context = row.get_style_context()
             if index == self.selected:
                 context.add_class("selected")
             else:
                 context.remove_class("selected")
+
+    def build_row(self, item):
+        if item["type"] == "playlist":
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            row.get_style_context().add_class("menu-row")
+            image = Gtk.Image()
+            image.set_size_request(PLAYLIST_ART_SIZE, PLAYLIST_ART_SIZE)
+            image.get_style_context().add_class("playlist-cover")
+            playlist = item["playlist"]
+            art_path = cached_art_path(playlist.get("cover_url", ""))
+            if art_path:
+                try:
+                    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                        art_path, PLAYLIST_ART_SIZE, PLAYLIST_ART_SIZE, True
+                    )
+                    image.set_from_pixbuf(pixbuf)
+                except Exception:
+                    image.clear()
+            row.pack_start(image, False, False, 0)
+            label = Gtk.Label(label=self.item_label(item), xalign=0)
+            label.set_ellipsize(Pango.EllipsizeMode.END)
+            row.pack_start(label, True, True, 0)
+            row.menu_label = label
+            return row
+
+        row = Gtk.Label(label=self.item_label(item), xalign=0)
+        row.get_style_context().add_class("menu-row")
+        row.menu_label = row
+        return row
 
     def move(self, delta):
         now = time.monotonic()
@@ -488,6 +635,50 @@ class GameMenu(Gtk.Window):
 
         item = self.items[self.selected]
         item_type = item["type"]
+        if item_type == "playlists":
+            self.view = "playlists"
+            self.selected = 0
+            self.playlist_page = 0
+            self.playlists = load_playlists()
+            self.rebuild_rows()
+            return
+        if item_type == "play_modes":
+            self.view = "play_modes"
+            self.selected = 0
+            self.rebuild_rows()
+            return
+        if item_type == "playlist":
+            subprocess.Popen(["playerctl", "-p", "spotify", "open", item["playlist"]["uri"]])
+            Gtk.main_quit()
+            return
+        if item_type == "playlist_next_page":
+            self.playlist_page += 1
+            self.selected = 0
+            self.rebuild_rows()
+            return
+        if item_type == "playlist_prev_page":
+            self.playlist_page = max(0, self.playlist_page - 1)
+            self.selected = 0
+            self.rebuild_rows()
+            return
+        if item_type == "empty":
+            return
+        if item_type == "shuffle_toggle":
+            subprocess.Popen(["playerctl", "-p", "spotify", "shuffle", "Toggle"])
+            GLib.timeout_add(200, self.refresh_once)
+            return
+        if item_type == "repeat_none":
+            subprocess.Popen(["playerctl", "-p", "spotify", "loop", "None"])
+            GLib.timeout_add(200, self.refresh_once)
+            return
+        if item_type == "repeat_track":
+            subprocess.Popen(["playerctl", "-p", "spotify", "loop", "Track"])
+            GLib.timeout_add(200, self.refresh_once)
+            return
+        if item_type == "repeat_playlist":
+            subprocess.Popen(["playerctl", "-p", "spotify", "loop", "Playlist"])
+            GLib.timeout_add(200, self.refresh_once)
+            return
         if item_type == "settings":
             self.view = "settings"
             self.selected = 0
@@ -588,7 +779,7 @@ class GameMenu(Gtk.Window):
             self.go_back()
 
     def go_back(self):
-        if self.view == "settings":
+        if self.view != "main":
             self.view = "main"
             self.selected = 0
             self.rebuild_rows()
