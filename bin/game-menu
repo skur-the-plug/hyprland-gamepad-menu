@@ -32,6 +32,17 @@ DPAD_Y = 7
 LEFT_STICK_Y = 1
 MOVE_DEBOUNCE = 0.18
 EVIOCGRAB = 1074021776
+EV_KEY = 1
+EV_ABS = 3
+ABS_Y = 1
+ABS_X = 0
+ABS_HAT0X = 16
+ABS_HAT0Y = 17
+BTN_SOUTH = 304
+BTN_EAST = 305
+BTN_MODE = 316
+ANALOG_CENTER = 128
+ANALOG_DEADZONE = 48
 
 
 ITEMS = [
@@ -240,7 +251,7 @@ def release_gamepad(gamepad_event):
 
 
 class GameMenu(Gtk.Window):
-    def __init__(self):
+    def __init__(self, grabbed_gamepad=None):
         super().__init__(title="Game Menu")
         self.set_default_size(420, 520)
         self.set_resizable(False)
@@ -255,6 +266,7 @@ class GameMenu(Gtk.Window):
         self.selected = 0
         self.last_move = 0.0
         self.gamepad = None
+        self.gamepad_event = grabbed_gamepad
         self.rows = []
         self.art = Gtk.Image()
         self.track_title = Gtk.Label(xalign=0)
@@ -334,6 +346,8 @@ class GameMenu(Gtk.Window):
         GLib.timeout_add(1000, self.update_now_playing_timer)
 
     def try_open_gamepad(self):
+        if self.gamepad_event is not None:
+            return
         if self.gamepad is not None:
             return
         try:
@@ -428,6 +442,9 @@ class GameMenu(Gtk.Window):
             Gtk.main_quit()
 
     def poll_gamepad(self):
+        if self.gamepad_event is not None:
+            return self.poll_grabbed_gamepad()
+
         self.try_open_gamepad()
         if self.gamepad is None:
             return True
@@ -468,6 +485,49 @@ class GameMenu(Gtk.Window):
 
         return True
 
+    def poll_grabbed_gamepad(self):
+        try:
+            while True:
+                ready, _, _ = select.select([self.gamepad_event], [], [], 0)
+                if not ready:
+                    break
+
+                data = self.gamepad_event.read(24)
+                if len(data) != 24:
+                    break
+
+                _, _, event_type, code, value = struct.unpack("llHHi", data)
+                if event_type == EV_ABS:
+                    if code in (ABS_HAT0Y,):
+                        if value == 1:
+                            self.move(1)
+                        elif value == -1:
+                            self.move(-1)
+                    elif code == ABS_HAT0X:
+                        if value == 1:
+                            self.move(1)
+                        elif value == -1:
+                            self.move(-1)
+                    elif code == ABS_Y:
+                        if value > ANALOG_CENTER + ANALOG_DEADZONE:
+                            self.move(1)
+                        elif value < ANALOG_CENTER - ANALOG_DEADZONE:
+                            self.move(-1)
+                    elif code == ABS_X:
+                        if value > ANALOG_CENTER + ANALOG_DEADZONE:
+                            self.move(1)
+                        elif value < ANALOG_CENTER - ANALOG_DEADZONE:
+                            self.move(-1)
+                elif event_type == EV_KEY and value == 1:
+                    if code == BTN_SOUTH:
+                        self.activate()
+                    elif code in (BTN_EAST, BTN_MODE):
+                        Gtk.main_quit()
+        except OSError:
+            Gtk.main_quit()
+
+        return True
+
 
 def main():
     lock_file = open(LOCK_PATH, "w")
@@ -477,7 +537,7 @@ def main():
         return 0
 
     grabbed_gamepad = grab_gamepad()
-    window = GameMenu()
+    window = GameMenu(grabbed_gamepad)
     try:
         Gtk.main()
     finally:
