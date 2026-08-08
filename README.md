@@ -8,6 +8,8 @@ It opens from a gamepad Home/Guide button and can be controlled with:
 - A: activate selected action
 - B or Home/Guide: close
 
+While the menu is open it tries to exclusively grab the controller event device, so background games do not also receive the menu navigation buttons.
+
 The menu includes Spotify now-playing artwork, title, artist, elapsed time, a progress bar, remaining time, media controls, volume controls, Steam Big Picture, screenshots, system monitor, and Hyprland exit.
 
 ## Requirements
@@ -20,6 +22,7 @@ The menu includes Spotify now-playing artwork, title, artist, elapsed time, a pr
 - `steam`
 - `grim`, `slurp`, and `wl-copy` for screenshots
 - A controller exposed as `/dev/input/js0` or `/dev/input/by-id/usb-Zikway_HID_gamepad-joystick`
+- Read access to `/dev/input/by-id/usb-Zikway_HID_gamepad-event-joystick` for exclusive input grabbing
 
 ## Install
 

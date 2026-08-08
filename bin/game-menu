@@ -18,6 +18,7 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango
 
 GAMEPAD = "/dev/input/by-id/usb-Zikway_HID_gamepad-joystick"
+GAMEPAD_EVENT = "/dev/input/by-id/usb-Zikway_HID_gamepad-event-joystick"
 FALLBACK = "/dev/input/js0"
 LOCK_PATH = "/tmp/game-menu.lock"
 ART_CACHE_DIR = "/tmp/game-menu-art"
@@ -30,6 +31,7 @@ DPAD_X = 6
 DPAD_Y = 7
 LEFT_STICK_Y = 1
 MOVE_DEBOUNCE = 0.18
+EVIOCGRAB = 1074021776
 
 
 ITEMS = [
@@ -216,6 +218,25 @@ def format_time(seconds):
     seconds = max(0, int(seconds))
     minutes, seconds = divmod(seconds, 60)
     return f"{minutes}:{seconds:02d}"
+
+
+def grab_gamepad():
+    try:
+        gamepad_event = open(GAMEPAD_EVENT, "rb", buffering=0)
+        fcntl.ioctl(gamepad_event, EVIOCGRAB, 1)
+        return gamepad_event
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+
+
+def release_gamepad(gamepad_event):
+    if gamepad_event is None:
+        return
+    try:
+        fcntl.ioctl(gamepad_event, EVIOCGRAB, 0)
+    except OSError:
+        pass
+    gamepad_event.close()
 
 
 class GameMenu(Gtk.Window):
@@ -455,9 +476,13 @@ def main():
     except BlockingIOError:
         return 0
 
+    grabbed_gamepad = grab_gamepad()
     window = GameMenu()
-    Gtk.main()
-    window.destroy()
+    try:
+        Gtk.main()
+    finally:
+        release_gamepad(grabbed_gamepad)
+        window.destroy()
     return 0
 
 
