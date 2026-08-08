@@ -24,6 +24,7 @@ FALLBACK = "/dev/input/js0"
 LOCK_PATH = "/tmp/game-menu.lock"
 ART_CACHE_DIR = "/tmp/game-menu-art"
 ART_SIZE = 112
+MUSIC_CONTROL_SIZE = 44
 CONFIG_PATH = os.path.expanduser("~/.config/gamepad-menu/settings.json")
 PLAYLISTS_PATH = os.path.expanduser("~/.config/gamepad-menu/playlists.json")
 PLAYLIST_ART_SIZE = 44
@@ -57,9 +58,6 @@ DEFAULT_SETTINGS = {
 
 
 ACTIONS = [
-    {"key": "play_pause", "label": "Play / pause", "command": ["playerctl", "play-pause"], "close_after": False},
-    {"key": "next_track", "label": "Next track", "command": ["playerctl", "next"], "close_after": False},
-    {"key": "previous_track", "label": "Previous track", "command": ["playerctl", "previous"], "close_after": False},
     {"key": "volume_up", "label": "Volume up", "command": ["wpctl", "set-volume", "-l", "1", "@DEFAULT_AUDIO_SINK@", "5%+"], "close_after": False},
     {"key": "volume_down", "label": "Volume down", "command": ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"], "close_after": False},
     {"key": "mute_volume", "label": "Mute volume", "command": ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"], "close_after": False},
@@ -67,6 +65,15 @@ ACTIONS = [
     {"key": "screenshot_area", "label": "Screenshot area", "command": 'grim -g "$(slurp)" - | wl-copy', "close_after": True},
     {"key": "system_monitor", "label": "System monitor", "command": ["plasma-systemmonitor"], "close_after": True},
     {"key": "exit_hyprland", "label": "Exit Hyprland", "command": ["hyprctl", "dispatch", "exit"], "close_after": True},
+]
+
+
+MUSIC_CONTROLS = [
+    {"key": "shuffle", "icon": "↝", "command": ["playerctl", "-p", "spotify", "shuffle", "Toggle"]},
+    {"key": "previous", "icon": "⏮", "command": ["playerctl", "-p", "spotify", "previous"]},
+    {"key": "play_pause", "icon": "⏸", "command": ["playerctl", "-p", "spotify", "play-pause"]},
+    {"key": "next", "icon": "⏭", "command": ["playerctl", "-p", "spotify", "next"]},
+    {"key": "repeat", "icon": "↻", "command": None},
 ]
 
 
@@ -93,6 +100,11 @@ window {
     padding: 10px;
 }
 
+#music-cover {
+    background: #30343b;
+    border-radius: 8px;
+}
+
 #track-title {
     font-size: 16px;
     font-weight: 700;
@@ -108,6 +120,20 @@ window {
     font-size: 12px;
 }
 
+.music-control {
+    min-width: 42px;
+    min-height: 34px;
+    padding: 5px 0;
+    border-radius: 6px;
+    font-size: 22px;
+    font-weight: 700;
+}
+
+.music-selected {
+    background: #2f7dd3;
+    color: white;
+}
+
 progressbar trough {
     min-height: 6px;
     border-radius: 999px;
@@ -118,11 +144,6 @@ progressbar progress {
     min-height: 6px;
     border-radius: 999px;
     background: #2f7dd3;
-}
-
-#album-placeholder {
-    background: #30343b;
-    border-radius: 6px;
 }
 
 .playlist-cover {
@@ -303,6 +324,10 @@ def loop_state():
     return playerctl_value("loop", "None")
 
 
+def play_status():
+    return playerctl_value("status", "Stopped")
+
+
 def cached_art_path(art_url):
     if not art_url:
         return None
@@ -369,6 +394,8 @@ class GameMenu(Gtk.Window):
             pass
 
         self.selected = 0
+        self.selected_area = "music"
+        self.music_selected = 2
         self.view = "main"
         self.items = []
         self.settings = load_settings()
@@ -384,6 +411,7 @@ class GameMenu(Gtk.Window):
         self.elapsed_label = Gtk.Label(xalign=0)
         self.remaining_label = Gtk.Label(xalign=1)
         self.progress = Gtk.ProgressBar()
+        self.music_rows = []
 
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS.encode())
@@ -409,7 +437,7 @@ class GameMenu(Gtk.Window):
         box.pack_start(now_playing, False, False, 0)
 
         self.art.set_size_request(ART_SIZE, ART_SIZE)
-        self.art.set_name("album-placeholder")
+        self.art.set_name("music-cover")
         now_playing.pack_start(self.art, False, False, 0)
 
         track_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -434,6 +462,18 @@ class GameMenu(Gtk.Window):
         self.remaining_label.set_name("track-time")
         time_box.pack_start(self.elapsed_label, False, False, 0)
         time_box.pack_end(self.remaining_label, False, False, 0)
+
+        controls_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        controls_box.set_halign(Gtk.Align.CENTER)
+        controls_box.set_margin_top(8)
+        track_box.pack_start(controls_box, False, False, 0)
+
+        for control in MUSIC_CONTROLS:
+            control_label = Gtk.Label(label=control["icon"])
+            control_label.get_style_context().add_class("music-control")
+            control_label.set_size_request(MUSIC_CONTROL_SIZE, -1)
+            controls_box.pack_start(control_label, False, False, 0)
+            self.music_rows.append(control_label)
 
         hint = Gtk.Label(label="D-pad/left stick: move    A: select    B/Home: close", xalign=0)
         hint.set_name("hint")
@@ -465,7 +505,6 @@ class GameMenu(Gtk.Window):
     def main_items(self):
         items = []
         items.append({"type": "playlists"})
-        items.append({"type": "play_modes"})
         for action in ACTIONS:
             if self.settings["show_actions"].get(action["key"], True):
                 items.append({"type": "action", "action": action})
@@ -580,15 +619,37 @@ class GameMenu(Gtk.Window):
         self.refresh()
 
     def refresh(self):
+        for index, row in enumerate(self.music_rows):
+            context = row.get_style_context()
+            row.set_text(self.music_control_label(MUSIC_CONTROLS[index]))
+            if self.selected_area == "music" and index == self.music_selected:
+                context.add_class("music-selected")
+            else:
+                context.remove_class("music-selected")
+
         for index, row in enumerate(self.rows):
             label = getattr(row, "menu_label", None)
             if label is not None:
                 label.set_text(self.item_label(self.items[index]))
             context = row.get_style_context()
-            if index == self.selected:
+            if self.selected_area == "menu" and index == self.selected:
                 context.add_class("selected")
             else:
                 context.remove_class("selected")
+
+    def music_control_label(self, control):
+        if control["key"] == "play_pause":
+            return "⏸" if play_status() == "Playing" else "▶"
+        if control["key"] == "shuffle":
+            return "⇄•" if shuffle_state() == "On" else "⇄"
+        if control["key"] == "repeat":
+            state = loop_state()
+            if state == "Track":
+                return "↻1"
+            if state == "Playlist":
+                return "↻•"
+            return "↻"
+        return control["icon"]
 
     def build_row(self, item):
         if item["type"] == "playlist":
@@ -624,12 +685,29 @@ class GameMenu(Gtk.Window):
         if now - self.last_move < MOVE_DEBOUNCE:
             return
         self.last_move = now
-        if not self.items:
-            return
-        self.selected = (self.selected + delta) % len(self.items)
+        if delta > 0 and self.selected_area == "music":
+            self.selected_area = "menu"
+            self.selected = 0
+        elif delta < 0 and self.selected_area == "menu" and self.selected == 0:
+            self.selected_area = "music"
+        elif self.selected_area == "menu" and self.items:
+            self.selected = (self.selected + delta) % len(self.items)
         self.refresh()
 
+    def move_horizontal(self, delta):
+        now = time.monotonic()
+        if now - self.last_move < MOVE_DEBOUNCE:
+            return
+        self.last_move = now
+        if self.selected_area == "music":
+            self.music_selected = (self.music_selected + delta) % len(MUSIC_CONTROLS)
+            self.refresh()
+
     def activate(self):
+        if self.selected_area == "music":
+            self.activate_music_control()
+            return
+
         if not self.items:
             return
 
@@ -718,6 +796,22 @@ class GameMenu(Gtk.Window):
             GLib.timeout_add(400, self.update_now_playing_once)
             GLib.timeout_add(120, self.refresh_once)
 
+    def activate_music_control(self):
+        control = MUSIC_CONTROLS[self.music_selected]
+        if control["key"] == "repeat":
+            current = loop_state()
+            if current == "None":
+                command = ["playerctl", "-p", "spotify", "loop", "Playlist"]
+            elif current == "Playlist":
+                command = ["playerctl", "-p", "spotify", "loop", "Track"]
+            else:
+                command = ["playerctl", "-p", "spotify", "loop", "None"]
+        else:
+            command = control["command"]
+        subprocess.Popen(command)
+        GLib.timeout_add(250, self.update_now_playing_once)
+        GLib.timeout_add(250, self.refresh_once)
+
     def update_now_playing_once(self):
         self.update_now_playing()
         return False
@@ -773,6 +867,10 @@ class GameMenu(Gtk.Window):
             self.move(-1)
         elif key in ("Down", "KP_Down"):
             self.move(1)
+        elif key in ("Left", "KP_Left"):
+            self.move_horizontal(-1)
+        elif key in ("Right", "KP_Right"):
+            self.move_horizontal(1)
         elif key in ("Return", "KP_Enter", "space"):
             self.activate()
         elif key in ("Escape", "BackSpace"):
@@ -817,9 +915,9 @@ class GameMenu(Gtk.Window):
                             self.move(1)
                     elif number == DPAD_X:
                         if value < -18000:
-                            self.move(-1)
+                            self.move_horizontal(-1)
                         elif value > 18000:
-                            self.move(1)
+                            self.move_horizontal(1)
                 elif event_type & 0x01 and value == 1:
                     if number == A_BUTTON:
                         self.activate()
@@ -850,9 +948,9 @@ class GameMenu(Gtk.Window):
                             self.move(-1)
                     elif code == ABS_HAT0X:
                         if value == 1:
-                            self.move(1)
+                            self.move_horizontal(1)
                         elif value == -1:
-                            self.move(-1)
+                            self.move_horizontal(-1)
                     elif code == ABS_Y:
                         if value > ANALOG_CENTER + ANALOG_DEADZONE:
                             self.move(1)
@@ -860,9 +958,9 @@ class GameMenu(Gtk.Window):
                             self.move(-1)
                     elif code == ABS_X:
                         if value > ANALOG_CENTER + ANALOG_DEADZONE:
-                            self.move(1)
+                            self.move_horizontal(1)
                         elif value < ANALOG_CENTER - ANALOG_DEADZONE:
-                            self.move(-1)
+                            self.move_horizontal(-1)
                 elif event_type == EV_KEY and value == 1:
                     if code == BTN_SOUTH:
                         self.activate()
