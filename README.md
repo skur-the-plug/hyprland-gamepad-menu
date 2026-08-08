@@ -12,6 +12,8 @@ While the menu is open it tries to exclusively grab the controller event device,
 
 The menu includes Spotify now-playing artwork, title, artist, elapsed time, a progress bar, remaining time, media controls, volume controls, Steam Big Picture, screenshots, system monitor, and Hyprland exit.
 
+The Settings entry lets you toggle visible menu actions and enable auto pause on open. Auto pause sends `Escape` to the focused game before the overlay opens, which matches the pause/menu key for many PC games.
+
 ## Requirements
 
 - Hyprland
@@ -21,6 +23,7 @@ The menu includes Spotify now-playing artwork, title, artist, elapsed time, a pr
 - `wireplumber` or PipeWire tools for `wpctl`
 - `steam`
 - `grim`, `slurp`, and `wl-copy` for screenshots
+- `wtype` for auto pause on open
 - A controller exposed as `/dev/input/js0` or `/dev/input/by-id/usb-Zikway_HID_gamepad-joystick`
 - Read access to `/dev/input/by-id/usb-Zikway_HID_gamepad-event-joystick` for exclusive input grabbing
 

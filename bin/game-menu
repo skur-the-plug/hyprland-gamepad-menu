@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import fcntl
 import hashlib
+import json
 import os
 import select
 import struct
@@ -23,6 +24,7 @@ FALLBACK = "/dev/input/js0"
 LOCK_PATH = "/tmp/game-menu.lock"
 ART_CACHE_DIR = "/tmp/game-menu-art"
 ART_SIZE = 112
+CONFIG_PATH = os.path.expanduser("~/.config/gamepad-menu/settings.json")
 
 A_BUTTON = 0
 B_BUTTON = 1
@@ -45,17 +47,23 @@ ANALOG_CENTER = 128
 ANALOG_DEADZONE = 48
 
 
-ITEMS = [
-    ("Play / pause", ["playerctl", "play-pause"], False),
-    ("Next track", ["playerctl", "next"], False),
-    ("Previous track", ["playerctl", "previous"], False),
-    ("Volume up", ["wpctl", "set-volume", "-l", "1", "@DEFAULT_AUDIO_SINK@", "5%+"], False),
-    ("Volume down", ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"], False),
-    ("Mute volume", ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"], False),
-    ("Open Steam Big Picture", ["steam", "-gamepadui"], True),
-    ("Screenshot area", 'grim -g "$(slurp)" - | wl-copy', True),
-    ("System monitor", ["plasma-systemmonitor"], True),
-    ("Exit Hyprland", ["hyprctl", "dispatch", "exit"], True),
+DEFAULT_SETTINGS = {
+    "auto_pause_on_open": False,
+    "show_actions": {},
+}
+
+
+ACTIONS = [
+    {"key": "play_pause", "label": "Play / pause", "command": ["playerctl", "play-pause"], "close_after": False},
+    {"key": "next_track", "label": "Next track", "command": ["playerctl", "next"], "close_after": False},
+    {"key": "previous_track", "label": "Previous track", "command": ["playerctl", "previous"], "close_after": False},
+    {"key": "volume_up", "label": "Volume up", "command": ["wpctl", "set-volume", "-l", "1", "@DEFAULT_AUDIO_SINK@", "5%+"], "close_after": False},
+    {"key": "volume_down", "label": "Volume down", "command": ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"], "close_after": False},
+    {"key": "mute_volume", "label": "Mute volume", "command": ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"], "close_after": False},
+    {"key": "steam_big_picture", "label": "Open Steam Big Picture", "command": ["steam", "-gamepadui"], "close_after": True},
+    {"key": "screenshot_area", "label": "Screenshot area", "command": 'grim -g "$(slurp)" - | wl-copy', "close_after": True},
+    {"key": "system_monitor", "label": "System monitor", "command": ["plasma-systemmonitor"], "close_after": True},
+    {"key": "exit_hyprland", "label": "Exit Hyprland", "command": ["hyprctl", "dispatch", "exit"], "close_after": True},
 ]
 
 
@@ -140,6 +148,41 @@ def shutil_which(name):
     return None
 
 
+def default_settings():
+    settings = {
+        "auto_pause_on_open": DEFAULT_SETTINGS["auto_pause_on_open"],
+        "show_actions": {},
+    }
+    for action in ACTIONS:
+        settings["show_actions"][action["key"]] = True
+    return settings
+
+
+def load_settings():
+    settings = default_settings()
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as settings_file:
+            loaded = json.load(settings_file)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return settings
+
+    if isinstance(loaded.get("auto_pause_on_open"), bool):
+        settings["auto_pause_on_open"] = loaded["auto_pause_on_open"]
+    if isinstance(loaded.get("show_actions"), dict):
+        for action in ACTIONS:
+            value = loaded["show_actions"].get(action["key"])
+            if isinstance(value, bool):
+                settings["show_actions"][action["key"]] = value
+    return settings
+
+
+def save_settings(settings):
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as settings_file:
+        json.dump(settings, settings_file, indent=2, sort_keys=True)
+        settings_file.write("\n")
+
+
 def open_gamepad():
     path = GAMEPAD if os.path.exists(GAMEPAD) else FALLBACK
     return open(path, "rb", buffering=0)
@@ -196,6 +239,19 @@ def current_track():
         "length": length_seconds,
         "position": position,
     }
+
+
+def volume_is_muted():
+    try:
+        output = subprocess.check_output(
+            ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+        )
+    except Exception:
+        return False
+    return "[MUTED]" in output
 
 
 def cached_art_path(art_url):
@@ -264,6 +320,9 @@ class GameMenu(Gtk.Window):
             pass
 
         self.selected = 0
+        self.view = "main"
+        self.items = []
+        self.settings = load_settings()
         self.last_move = 0.0
         self.gamepad = None
         self.gamepad_event = grabbed_gamepad
@@ -329,16 +388,13 @@ class GameMenu(Gtk.Window):
         hint.set_name("hint")
         box.pack_start(hint, False, False, 0)
 
-        for label, _, _ in ITEMS:
-            row = Gtk.Label(label=label, xalign=0)
-            row.get_style_context().add_class("menu-row")
-            box.pack_start(row, False, False, 0)
-            self.rows.append(row)
+        self.menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.pack_start(self.menu_box, False, False, 0)
+        self.rebuild_rows()
 
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self.on_key_press)
         self.update_now_playing()
-        self.refresh()
         self.show_all()
 
         self.try_open_gamepad()
@@ -355,8 +411,61 @@ class GameMenu(Gtk.Window):
         except (FileNotFoundError, PermissionError):
             self.gamepad = None
 
+    def main_items(self):
+        items = []
+        for action in ACTIONS:
+            if self.settings["show_actions"].get(action["key"], True):
+                items.append({"type": "action", "action": action})
+        items.append({"type": "settings"})
+        return items
+
+    def settings_items(self):
+        items = [{"type": "toggle_auto_pause"}]
+        for action in ACTIONS:
+            items.append({"type": "toggle_action", "action": action})
+        items.append({"type": "back"})
+        return items
+
+    def item_label(self, item):
+        item_type = item["type"]
+        if item_type == "action":
+            if item["action"]["key"] == "mute_volume" and volume_is_muted():
+                return "Unmute volume"
+            return item["action"]["label"]
+        if item_type == "settings":
+            return "Settings"
+        if item_type == "toggle_auto_pause":
+            state = "On" if self.settings["auto_pause_on_open"] else "Off"
+            return f"Auto pause on open: {state}"
+        if item_type == "toggle_action":
+            action = item["action"]
+            state = "On" if self.settings["show_actions"].get(action["key"], True) else "Off"
+            return f"Show {action['label']}: {state}"
+        if item_type == "back":
+            return "Back"
+        return ""
+
+    def rebuild_rows(self):
+        for child in self.menu_box.get_children():
+            self.menu_box.remove(child)
+
+        self.items = self.settings_items() if self.view == "settings" else self.main_items()
+        if self.selected >= len(self.items):
+            self.selected = max(0, len(self.items) - 1)
+
+        self.rows = []
+        for item in self.items:
+            row = Gtk.Label(label=self.item_label(item), xalign=0)
+            row.get_style_context().add_class("menu-row")
+            self.menu_box.pack_start(row, False, False, 0)
+            self.rows.append(row)
+
+        self.menu_box.show_all()
+        self.refresh()
+
     def refresh(self):
         for index, row in enumerate(self.rows):
+            row.set_text(self.item_label(self.items[index]))
             context = row.get_style_context()
             if index == self.selected:
                 context.add_class("selected")
@@ -368,11 +477,43 @@ class GameMenu(Gtk.Window):
         if now - self.last_move < MOVE_DEBOUNCE:
             return
         self.last_move = now
-        self.selected = (self.selected + delta) % len(ITEMS)
+        if not self.items:
+            return
+        self.selected = (self.selected + delta) % len(self.items)
         self.refresh()
 
     def activate(self):
-        _, command, close_after = ITEMS[self.selected]
+        if not self.items:
+            return
+
+        item = self.items[self.selected]
+        item_type = item["type"]
+        if item_type == "settings":
+            self.view = "settings"
+            self.selected = 0
+            self.rebuild_rows()
+            return
+        if item_type == "toggle_auto_pause":
+            self.settings["auto_pause_on_open"] = not self.settings["auto_pause_on_open"]
+            save_settings(self.settings)
+            self.refresh()
+            return
+        if item_type == "toggle_action":
+            action = item["action"]
+            current = self.settings["show_actions"].get(action["key"], True)
+            self.settings["show_actions"][action["key"]] = not current
+            save_settings(self.settings)
+            self.refresh()
+            return
+        if item_type == "back":
+            self.view = "main"
+            self.selected = 0
+            self.rebuild_rows()
+            return
+
+        action = item["action"]
+        command = action["command"]
+        close_after = action["close_after"]
         try:
             if isinstance(command, str):
                 subprocess.Popen(command, shell=True)
@@ -384,9 +525,14 @@ class GameMenu(Gtk.Window):
             Gtk.main_quit()
         else:
             GLib.timeout_add(400, self.update_now_playing_once)
+            GLib.timeout_add(120, self.refresh_once)
 
     def update_now_playing_once(self):
         self.update_now_playing()
+        return False
+
+    def refresh_once(self):
+        self.refresh()
         return False
 
     def update_now_playing_timer(self):
@@ -439,6 +585,14 @@ class GameMenu(Gtk.Window):
         elif key in ("Return", "KP_Enter", "space"):
             self.activate()
         elif key in ("Escape", "BackSpace"):
+            self.go_back()
+
+    def go_back(self):
+        if self.view == "settings":
+            self.view = "main"
+            self.selected = 0
+            self.rebuild_rows()
+        else:
             Gtk.main_quit()
 
     def poll_gamepad(self):
@@ -479,7 +633,7 @@ class GameMenu(Gtk.Window):
                     if number == A_BUTTON:
                         self.activate()
                     elif number in (B_BUTTON, HOME_BUTTON):
-                        Gtk.main_quit()
+                        self.go_back()
         except OSError:
             self.gamepad = None
 
@@ -522,7 +676,7 @@ class GameMenu(Gtk.Window):
                     if code == BTN_SOUTH:
                         self.activate()
                     elif code in (BTN_EAST, BTN_MODE):
-                        Gtk.main_quit()
+                        self.go_back()
         except OSError:
             Gtk.main_quit()
 
