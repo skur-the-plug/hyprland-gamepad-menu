@@ -10,8 +10,10 @@ A controller-friendly overlay menu for Hyprland. It is meant for game sessions w
 - Spotify now-playing panel with cover art, title, artist, progress, elapsed time, and remaining time.
 - Spotify playlist picker with cover thumbnails, paged 8 playlists at a time.
 - Spotify play modes: shuffle and repeat off/track/playlist.
-- Settings screen for hiding menu actions and enabling auto pause on open.
+- Settings screen for hiding menu actions and enabling auto key presses on open.
 - Auto pause sends `Escape` to the focused game before opening the overlay.
+- Auto space sends `Space` to the focused game before opening the overlay.
+- TV mode lets the controller control playback without opening the overlay: D-pad up/down adjusts volume, with an optional A/X-to-Space toggle for controllers that do not send Space themselves.
 
 ## Requirements
 
@@ -114,6 +116,9 @@ The menu writes settings to:
 Available settings in the UI:
 
 - `Auto pause on open`: sends `Escape` to the focused game before opening the overlay.
+- `Auto space on open`: sends `Space` to the focused game before opening the overlay. Turning this on disables auto pause, so only one key is sent.
+- `TV mode`: while enabled, D-pad up/down adjusts volume without opening the overlay.
+- `TV mode A/X sends Space`: optionally injects Space from A/X for controllers that do not already send Space themselves. Leave this off if A/X already pauses playback.
 - `Show ...`: toggles which actions appear in the main menu.
 
 ## Controls
@@ -125,6 +130,6 @@ Available settings in the UI:
 
 ## Notes
 
-- Auto pause is game-dependent. Many PC games pause/open their menu on `Escape`; some do not.
+- Auto key presses are game-dependent. Many PC games pause/open their menu on `Escape`; some do not.
 - Online games may keep running server-side even if their local pause menu opens.
 - Playlist covers are loaded only for the visible page to keep the overlay responsive with large playlist libraries.

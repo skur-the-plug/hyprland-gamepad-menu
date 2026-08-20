@@ -53,14 +53,17 @@ ANALOG_DEADZONE = 48
 
 DEFAULT_SETTINGS = {
     "auto_pause_on_open": False,
+    "auto_space_on_open": False,
+    "tv_mode_enabled": False,
+    "tv_mode_send_space": False,
     "show_actions": {},
 }
 
 
 ACTIONS = [
-    {"key": "volume_up", "label": "Volume up", "command": ["wpctl", "set-volume", "-l", "1", "@DEFAULT_AUDIO_SINK@", "5%+"], "close_after": False},
-    {"key": "volume_down", "label": "Volume down", "command": ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"], "close_after": False},
-    {"key": "mute_volume", "label": "Mute volume", "command": ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"], "close_after": False},
+    {"key": "volume_up", "label": "Volume up", "command": None, "close_after": False},
+    {"key": "volume_down", "label": "Volume down", "command": None, "close_after": False},
+    {"key": "mute_volume", "label": "Mute volume", "command": None, "close_after": False},
     {"key": "steam_big_picture", "label": "Open Steam Big Picture", "command": ["steam", "-gamepadui"], "close_after": True},
     {"key": "screenshot_area", "label": "Screenshot area", "command": 'grim -g "$(slurp)" - | wl-copy', "close_after": True},
     {"key": "system_monitor", "label": "System monitor", "command": ["plasma-systemmonitor"], "close_after": True},
@@ -179,6 +182,9 @@ def shutil_which(name):
 def default_settings():
     settings = {
         "auto_pause_on_open": DEFAULT_SETTINGS["auto_pause_on_open"],
+        "auto_space_on_open": DEFAULT_SETTINGS["auto_space_on_open"],
+        "tv_mode_enabled": DEFAULT_SETTINGS["tv_mode_enabled"],
+        "tv_mode_send_space": DEFAULT_SETTINGS["tv_mode_send_space"],
         "show_actions": {},
     }
     for action in ACTIONS:
@@ -196,6 +202,12 @@ def load_settings():
 
     if isinstance(loaded.get("auto_pause_on_open"), bool):
         settings["auto_pause_on_open"] = loaded["auto_pause_on_open"]
+    if isinstance(loaded.get("auto_space_on_open"), bool):
+        settings["auto_space_on_open"] = loaded["auto_space_on_open"]
+    if isinstance(loaded.get("tv_mode_enabled"), bool):
+        settings["tv_mode_enabled"] = loaded["tv_mode_enabled"]
+    if isinstance(loaded.get("tv_mode_send_space"), bool):
+        settings["tv_mode_send_space"] = loaded["tv_mode_send_space"]
     if isinstance(loaded.get("show_actions"), dict):
         for action in ACTIONS:
             value = loaded["show_actions"].get(action["key"])
@@ -292,16 +304,71 @@ def current_track():
 
 
 def volume_is_muted():
+    target = audio_sink_target()
     try:
         output = subprocess.check_output(
-            ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
+            ["pactl", "get-sink-mute", target],
             text=True,
             stderr=subprocess.DEVNULL,
             timeout=1,
         )
     except Exception:
         return False
-    return "[MUTED]" in output
+    return "yes" in output.lower()
+
+
+def pactl_sinks():
+    try:
+        output = subprocess.check_output(
+            ["pactl", "list", "short", "sinks"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+        )
+    except Exception:
+        return []
+
+    sinks = []
+    for line in output.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 5:
+            continue
+        sinks.append({"id": fields[0], "name": fields[1], "state": fields[4]})
+    return sinks
+
+
+def default_sink_name():
+    try:
+        return subprocess.check_output(
+            ["pactl", "get-default-sink"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+        ).strip()
+    except Exception:
+        return ""
+
+
+def audio_sink_target():
+    sinks = pactl_sinks()
+    default_name = default_sink_name()
+    for sink in sinks:
+        if sink["name"] == default_name and sink["state"] == "RUNNING":
+            return sink["name"]
+    for sink in sinks:
+        if sink["state"] == "RUNNING":
+            return sink["name"]
+    return "@DEFAULT_SINK@"
+
+
+def run_volume_action(action_key):
+    target = audio_sink_target()
+    if action_key == "volume_up":
+        subprocess.Popen(["pactl", "set-sink-volume", target, "+5%"])
+    elif action_key == "volume_down":
+        subprocess.Popen(["pactl", "set-sink-volume", target, "-5%"])
+    elif action_key == "mute_volume":
+        subprocess.Popen(["pactl", "set-sink-mute", target, "toggle"])
 
 
 def playerctl_value(command, fallback):
@@ -544,7 +611,12 @@ class GameMenu(Gtk.Window):
         ]
 
     def settings_items(self):
-        items = [{"type": "toggle_auto_pause"}]
+        items = [
+            {"type": "toggle_tv_mode"},
+            {"type": "toggle_tv_mode_send_space"},
+            {"type": "toggle_auto_pause"},
+            {"type": "toggle_auto_space"},
+        ]
         for action in ACTIONS:
             items.append({"type": "toggle_action", "action": action})
         items.append({"type": "back"})
@@ -583,9 +655,18 @@ class GameMenu(Gtk.Window):
             return f"{prefix} Repeat playlist"
         if item_type == "settings":
             return "Settings"
+        if item_type == "toggle_tv_mode":
+            state = "On" if self.settings["tv_mode_enabled"] else "Off"
+            return f"TV mode: {state}"
+        if item_type == "toggle_tv_mode_send_space":
+            state = "On" if self.settings["tv_mode_send_space"] else "Off"
+            return f"TV mode A/X sends Space: {state}"
         if item_type == "toggle_auto_pause":
             state = "On" if self.settings["auto_pause_on_open"] else "Off"
             return f"Auto pause on open: {state}"
+        if item_type == "toggle_auto_space":
+            state = "On" if self.settings["auto_space_on_open"] else "Off"
+            return f"Auto space on open: {state}"
         if item_type == "toggle_action":
             action = item["action"]
             state = "On" if self.settings["show_actions"].get(action["key"], True) else "Off"
@@ -762,8 +843,29 @@ class GameMenu(Gtk.Window):
             self.selected = 0
             self.rebuild_rows()
             return
+        if item_type == "toggle_tv_mode":
+            self.settings["tv_mode_enabled"] = not self.settings["tv_mode_enabled"]
+            save_settings(self.settings)
+            self.refresh()
+            return
+        if item_type == "toggle_tv_mode_send_space":
+            self.settings["tv_mode_send_space"] = not self.settings["tv_mode_send_space"]
+            save_settings(self.settings)
+            self.refresh()
+            return
         if item_type == "toggle_auto_pause":
-            self.settings["auto_pause_on_open"] = not self.settings["auto_pause_on_open"]
+            enabled = not self.settings["auto_pause_on_open"]
+            self.settings["auto_pause_on_open"] = enabled
+            if enabled:
+                self.settings["auto_space_on_open"] = False
+            save_settings(self.settings)
+            self.refresh()
+            return
+        if item_type == "toggle_auto_space":
+            enabled = not self.settings["auto_space_on_open"]
+            self.settings["auto_space_on_open"] = enabled
+            if enabled:
+                self.settings["auto_pause_on_open"] = False
             save_settings(self.settings)
             self.refresh()
             return
@@ -781,6 +883,15 @@ class GameMenu(Gtk.Window):
             return
 
         action = item["action"]
+        if action["key"] in ("volume_up", "volume_down", "mute_volume"):
+            try:
+                run_volume_action(action["key"])
+            except Exception as exc:
+                notify(str(exc))
+            GLib.timeout_add(400, self.update_now_playing_once)
+            GLib.timeout_add(120, self.refresh_once)
+            return
+
         command = action["command"]
         close_after = action["close_after"]
         try:
