@@ -8,6 +8,7 @@ A controller-friendly overlay menu for Hyprland. It is meant for game sessions w
 - Controller navigation: D-pad or left stick to move, A to select, B/Home to go back or close.
 - Exclusively grabs the controller while open, so background games do not also receive menu inputs.
 - Spotify now-playing panel with cover art, title, artist, progress, elapsed time, and remaining time.
+- Spotify Liked Songs heart button for the current track.
 - Spotify playlist picker with cover thumbnails, paged 8 playlists at a time.
 - Spotify play modes: shuffle and repeat off/track/playlist.
 - Settings screen for hiding menu actions and enabling auto key presses on open.
@@ -83,13 +84,18 @@ http://127.0.0.1:8888/callback
 sync-spotify-playlists --client-id YOUR_SPOTIFY_CLIENT_ID
 ```
 
-The sync command uses Spotify Authorization Code with PKCE, asks for playlist-read scopes, and writes:
+The sync command uses Spotify Authorization Code with PKCE, asks for playlist-read and library read/write scopes, and writes:
 
 ```text
 ~/.config/gamepad-menu/playlists.json
 ```
 
 The menu reads that file and displays playlists under `Spotify playlists`.
+The heart button uses the same Spotify token to add or remove the current track from Liked Songs. If you authorized before the heart feature existed, run:
+
+```bash
+sync-spotify-playlists --reauth
+```
 
 You can also maintain the file manually:
 

@@ -17,7 +17,7 @@ CLIENT_PATH = os.path.join(CONFIG_DIR, "spotify-client.json")
 TOKEN_PATH = os.path.join(CONFIG_DIR, "spotify-token.json")
 PLAYLISTS_PATH = os.path.join(CONFIG_DIR, "playlists.json")
 REDIRECT_URI = "http://127.0.0.1:8888/callback"
-SCOPES = "playlist-read-private playlist-read-collaborative"
+SCOPES = "playlist-read-private playlist-read-collaborative user-library-read user-library-modify"
 
 
 class CallbackHandler(http.server.BaseHTTPRequestHandler):
