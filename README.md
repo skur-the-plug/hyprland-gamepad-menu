@@ -1,6 +1,16 @@
 # Hyprland Gamepad Menu
 
-A controller-friendly overlay menu for Hyprland. It is meant for game sessions where you want a quick controller menu for media, volume, Spotify, screenshots, Steam Big Picture, and desktop actions.
+A controller-friendly overlay for Hyprland gaming and couch media setups.
+
+Open a GTK menu from your controller Home/Guide button, control Spotify, launch Steam Big Picture, take screenshots, adjust the active audio sink, and keep a lightweight TV mode available without opening the full menu.
+
+![Hyprland Gamepad Menu screenshot](docs/screenshots/menu.png)
+
+## Why
+
+Hyprland is excellent for gaming setups, but controller-first desktop controls still take wiring: media keys, Bluetooth volume targeting, Steam Big Picture, Spotify playlists, and a quick overlay that does not leak inputs into the running game.
+
+This project packages that workflow into one small Python/GTK menu plus a listener.
 
 ## Features
 
@@ -15,6 +25,18 @@ A controller-friendly overlay menu for Hyprland. It is meant for game sessions w
 - Auto pause sends `Escape` to the focused game before opening the overlay.
 - Auto space sends `Space` to the focused game before opening the overlay.
 - TV mode lets the controller control playback without opening the overlay: D-pad up/down adjusts volume, with an optional A/X-to-Space toggle for controllers that do not send Space themselves.
+- Volume controls target the running audio sink first, so Bluetooth headphones can work even when the PipeWire default sink still points somewhere else.
+
+## Status
+
+This is an early personal setup tool. It works on the author's Hyprland setup and currently ships with Zikway-style controller defaults. Wider controller support is planned, but for now non-Zikway controllers may need button/device constants edited in the scripts.
+
+Good next improvements:
+
+- Configurable controller mapping instead of editing Python constants.
+- Demo GIF and screenshots.
+- AUR package or packaging instructions.
+- Explicit license file.
 
 ## Requirements
 
@@ -23,6 +45,7 @@ A controller-friendly overlay menu for Hyprland. It is meant for game sessions w
 - GTK 3 Python bindings: `python-gobject` / `python-gi`
 - `playerctl`
 - `wpctl` from WirePlumber/PipeWire
+- `pactl` from PulseAudio/PipeWire Pulse compatibility tools
 - `wtype` for auto pause on open
 - `grim`, `slurp`, and `wl-copy` for screenshots
 - `steam` for the Steam Big Picture action
